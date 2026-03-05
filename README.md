@@ -87,5 +87,3 @@ VITE_API_URL=http://localhost:5000/api
 - **Backend**: Express.js, Node.js
 - **Database**: MongoDB
 - **Architecture**: MVC Pattern
-
-Ready to start coding! 🚀
