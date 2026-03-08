@@ -1,40 +1,74 @@
 const mongoose = require('mongoose');
 
+// ============================================================
+// CLAIM SCHEMA — Stores everything about a single damage claim
+// ============================================================
+// This schema matches the EXACT structure returned by our 
+// CrashCost AI Engine (FastAPI on Hugging Face).
+//
+// Flow: User uploads image → Express sends to HF → HF returns
+// detections array → We store it here in MongoDB.
+// ============================================================
+
 const claimSchema = new mongoose.Schema({
-  // Data from your Frontend Step 1
-  vehicleDetails: {
-    vin: { type: String },
-    model: { type: String },
-    // ADDED: These match the exact 'name' attributes in your React form
-    year: { type: String },          
-    make: { type: String },          
-    car_model_val: { type: Number }, 
-    car_age: { type: Number },       
-    // Kept your originals just in case
-    marketValue: { type: Number },
-    age: { type: Number }
+
+  // ─── Owner: Which user submitted this claim ───
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',        // References the User model
+    required: false      // false so old claims without userId still work
   },
-  
-  // Data from your Frontend Step 2
+
+  // ─── STEP 1: Vehicle Details (from frontend form) ───
+  vehicleDetails: {
+    vin: { type: String },                // 17-digit Vehicle ID
+    model: { type: String },                // e.g. "Swift", "i20"
+    year: { type: String },                // e.g. "2020"
+    make: { type: String },                // e.g. "Maruti", "Hyundai"
+    brand: { type: String },                // Same as make (used by HF API)
+    tier: { type: String },                // "budget", "mid", "premium", "luxury"
+    segment: { type: String },                // "hatchback", "sedan", "suv"
+    damageLocation: { type: String },                // "front", "side", "rear"
+    car_model_val: { type: Number },                // Market value in ₹
+    car_age: { type: Number },                // Age in years
+  },
+
+  // ─── STEP 2: Incident Details (from frontend form) ───
   incidentDetails: {
     date: { type: Date },
     description: { type: String }
   },
-  
-  // Data from Hugging Face / XGBoost
+
+  // ─── STEP 3: AI Report (from HF CrashCost Engine) ───
+  // This is the FULL response from our FastAPI endpoint.
   aiReport: {
-    total_cost: { type: Number },
-    confidence: { type: mongoose.Schema.Types.Mixed }, 
-    damaged_parts: { type: Array }, 
-    // ADDED: These are the actual keys Hugging Face sends back in the JSON
-    part_name: { type: Array },      
-    damage_type: { type: Array },    
-    damage_ratio: { type: Array }    
+    total_estimate: { type: Number },               // Sum of all detection prices
+    estimate_range: [Number],                       // [min, max] confidence range
+    context: {                                      // Echo of what we sent
+      brand: String,
+      tier: String,
+      segment: String,
+      location: String
+    },
+    detections: [{                                  // Array of detected damages
+      id: { type: Number },           // 1, 2, 3...
+      label: { type: String },           // "DENT", "GLASS_DAMAGE", etc.
+      confidence: { type: Number },           // 0.0 to 1.0
+      surface_detected: { type: String },           // "metal", "glass", "plastic"
+      severity: { type: String },           // "MINOR", "MODERATE", "SEVERE"
+      ratio: { type: Number },           // Damage area percentage (0.0 to 0.4)
+      bbox: { type: mongoose.Schema.Types.Mixed }, // {x1, y1, x2, y2}
+      price: { type: Number },           // Estimated repair cost in ₹
+      drivers: [String],                   // Top 2 SHAP cost drivers
+      summary: { type: String },           // 1-2 sentence summary
+      narrative: { type: String },           // Full actuarial report
+    }]
   },
-  
-  // Meta data
+
+  // ─── META ───
   status: { type: String, default: 'Auto-Assessed' },
-  hfFileUrl: { type: String } // Storing the raw JSON link just in case
-}, { timestamps: true }); // Automatically adds createdAt and updatedAt dates
+
+}, { timestamps: true });
+// timestamps: true → automatically adds createdAt and updatedAt
 
 module.exports = mongoose.model('Claim', claimSchema);

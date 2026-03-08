@@ -1,199 +1,115 @@
+// ============================================================
+// SERVER.JS — Application Entry Point (Clean Bootstrap)
+// ============================================================
+// This file ONLY handles:
+//   1. Loading environment variables
+//   2. Setting up Express middleware
+//   3. Connecting to MongoDB
+//   4. Mounting routes
+//   5. Starting the server
+//
+// All business logic lives in /controllers
+// All route definitions live in /routes
+// All config (Gemini keys etc.) lives in /config
+// All data models live in /models
+//
+// MVC ARCHITECTURE:
+//   Model      →  /models/Claim.js
+//   View       →  React frontend (separate folder)
+//   Controller →  /controllers/claimController.js
+//   Routes     →  /routes/claimRoutes.js
+//   Config     →  /config/gemini.js
+// ============================================================
+
 const express = require('express');
 const cors = require('cors');
-const { Client } = require("@gradio/client");
-const multer = require('multer');
-const fs = require('fs');
-const axios = require('axios');
 const mongoose = require('mongoose');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
-const Claim = require('./models/Claim'); 
+// Import routes
+const claimRoutes = require('./routes/claimRoutes');
+const authRoutes = require('./routes/authRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// 1. Trust Render's Load Balancer (Strongly Recommended Fix #2)
-app.set('trust proxy', 1); 
 
-// --- 1. MULTI-KEY ROTATOR LOGIC ---
-// This pulls all 3 keys from your .env file to bypass the 1,500 limit
-const ALL_KEYS = [
-    process.env.GEMINI_API_KEY,
-    process.env.GEMINI_API_KEY_1,
-    process.env.GEMINI_API_KEY_2
-].filter(k => k); 
+// ─── 1. TRUST PROXY (Required for Render deployment) ───
+// Without this, Render's load balancer is seen as the only IP,
+// and rate limiting would block ALL users after 15 requests.
+app.set('trust proxy', 1);
 
-// 2. Fail Fast Key Validation (Strongly Recommended Fix #3)
-// FIX: Moved this BELOW the ALL_KEYS array definition so it doesn't crash Node!
-if (ALL_KEYS.length === 0) {
-    console.error("❌ CRITICAL ERROR: No Gemini API keys found in environment.");
-    process.exit(1); // Kills the server immediately so you know it's broken
-}
 
-let keyIndex = 0;
+// ─── 2. MIDDLEWARE ───
+// In production, FRONTEND_URL will be your Vercel domain. In dev, it falls back to localhost.
+const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000'].filter(Boolean);
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+}));
+app.use(express.json());                            // Parse JSON request bodies
+app.use(express.urlencoded({ extended: true }));     // Parse form data
 
-/**
- * Gets the next Gemini model instance using the round-robin rotator.
- */
-const getNextGeminiModel = () => {
-    const key = ALL_KEYS[keyIndex];
-    keyIndex = (keyIndex + 1) % ALL_KEYS.length; // Rotate for the next call
-    
-    const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({ 
-        model: "gemini-2.5-flash",
-        safetySettings: [
-            { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-            { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" }
-        ]
-    });
-};
 
-// --- 2. MIDDLEWARE & RATE LIMITING ---
-app.use(cors()); 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
+// ─── 3. RATE LIMITING ───
+// Prevents API spam. Limits each IP to 15 requests per minute.
 const aiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000, 
-  max: 15, // Total 15 requests per minute allowed across all teammates
-  message: { error: "System cooling down. Gemini needs 60 seconds to reset!" },
-  standardHeaders: true,
-  legacyHeaders: false,
+    windowMs: 1 * 60 * 1000,   // 1 minute window
+    max: 15,                    // 15 requests per window per IP
+    message: { error: "System cooling down. Please wait 60 seconds before trying again." },
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
-// Shields the AI routes from spam
+// Apply rate limiting to AI-heavy routes only
 app.use('/api/segment-car', aiLimiter);
 app.use('/api/explain', aiLimiter);
 
+
+// ─── 4. ENSURE UPLOADS FOLDER EXISTS ───
 if (!fs.existsSync('uploads')) {
     fs.mkdirSync('uploads');
 }
-const upload = multer({ dest: 'uploads/' });
 
-// --- 3. DATABASE CONNECTION ---
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('🔥 MongoDB Atlas Connected Successfully'))
-  .catch((err) => console.error('❌ MongoDB Connection Error:', err));
 
-// --- 4. CORE AI ROUTE (YOLOv11 + ROTATING GEMINI) ---
-app.post('/api/segment-car', upload.single('image'), async (req, res) => {
-    console.log(`\n--- [DEBUG] Analysis Request (Key Index: ${keyIndex}) ---`);
-    try {
-        if (!req.file) return res.status(400).json({ error: "No image payload." });
+// ─── 5. DATABASE CONNECTION ───
+// STUDENT PROJECT MODE: Continue even if MongoDB fails
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/insurevision')
+    .then(() => console.log('🔥 MongoDB Atlas Connected Successfully'))
+    .catch((err) => {
+        console.warn('⚠️ MongoDB Connection Failed (continuing in test mode):', err.message);
+        console.log('📝 Using test credentials: test@test.com / password');
+    });
 
-        const imageBuffer = fs.readFileSync(req.file.path);
-        const imageBlob = new Blob([imageBuffer], { type: req.file.mimetype });
 
-        // A. STEP 1: YOLOv11 Segmentation via Hugging Face
-        console.log("[DEBUG] Connecting to Hugging Face...");
-        const client = await Client.connect("Userabc/segmenter");
-        const result = await client.predict("/predict", { img: imageBlob });
+// ─── 6. MOUNT ROUTES ───
+// All /api/* routes are handled by claimRoutes
+app.use('/api', claimRoutes);
+// Authentication routes
+app.use('/api/auth', authRoutes);
 
-        fs.unlinkSync(req.file.path);
-
-        if (result.data && result.data[0]) {
-            const fileInfo = result.data[0];
-            const jsonUrl = typeof fileInfo === 'string' ? fileInfo : fileInfo.url;
-            const hfResponse = await axios.get(jsonUrl);
-            const reportData = hfResponse.data;
-
-            const vehicleDetails = JSON.parse(req.body.vehicleDetails || "{}");
-            const incidentDetails = JSON.parse(req.body.incidentDetails || "{}");
-
-            // B. STEP 2: Use Rotated Gemini for Cost Calculation
-            console.log("[DEBUG] Requesting Gemini Cost Adjuster...");
-            const model = getNextGeminiModel();
-            const costPrompt = `
-                You are an expert Insurance Adjuster in India.
-                CAR: ${vehicleDetails.year} ${vehicleDetails.model} (Value: ₹${vehicleDetails.car_model_val})
-                YOLO DETECTION: ${JSON.stringify(reportData.part_name)} damaged, ratio ${JSON.stringify(reportData.damage_ratio)}.
-                Return ONLY a JSON object: {"total_cost": number, "reasoning": "string"}
-            `;
-
-            const geminiResult = await model.generateContent(costPrompt);
-            const responseText = await geminiResult.response.text();
-            
-            // Fix: Strip markdown backticks before parsing
-            const cleanJson = responseText.replace(/```json|```/g, "").trim();
-            
-            try {
-                const costJson = JSON.parse(cleanJson);
-                reportData.total_cost = costJson.total_cost;
-                reportData.gemini_reasoning = costJson.reasoning;
-            } catch (e) {
-                console.error("[ERROR] Gemini JSON Parse Failed:", responseText);
-                reportData.total_cost = 0; // Fallback
-            }
-
-            // C. STEP 3: Save final Claim to MongoDB
-            const newClaim = new Claim({
-                vehicleDetails,
-                incidentDetails,
-                aiReport: reportData,
-                hfFileUrl: jsonUrl
-            });
-
-            const savedClaim = await newClaim.save();
-            console.log(`💰 Real-time Cost Calculated: ₹${reportData.total_cost}`);
-
-            res.json({ success: true, claimId: savedClaim._id, report: reportData });
-        }
-    } catch (error) {
-        console.error("Pipeline Error:", error.message);
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        res.status(500).json({ error: "Analysis failed", details: error.message });
-    }
-});
-
-// --- 5. XAI REASONING ROUTE ---
-app.post('/api/explain', async (req, res) => {
-    console.log(`\n--- [DEBUG] XAI Lab Query Received ---`);
-    try {
-        const { claimId, message } = req.body;
-        const claim = await Claim.findById(claimId);
-        if (!claim) return res.status(404).json({ error: "Claim not found." });
-
-        const model = getNextGeminiModel();
-        const prompt = `
-            You are the XAI (Explainable AI) module for InsureVision.
-            CONTEXT (Claim ID: ${claimId}):
-            - Vehicle: ${claim.vehicleDetails?.year} ${claim.vehicleDetails?.model}
-            - Incident: ${claim.incidentDetails?.description}
-            - AI Assessment: ₹${claim.aiReport?.total_cost}
-            - Parts Detected: ${JSON.stringify(claim.aiReport?.part_name)}
-            
-            USER QUESTION: "${message}"
-            Provide a technical but understandable explanation of how the AI arrived at its conclusions.
-        `;
-
-        const result = await model.generateContent(prompt);
-        const text = await result.response.text();
-        res.json({ answer: text });
-    } catch (error) {
-        console.error("XAI Error:", error.message);
-        res.status(500).json({ error: "XAI logic failed." });
-    }
-});
-
-// --- 6. DATA FETCHING & HEALTH CHECK ROUTE ---
-
-// Added Health Check for Render (Strongly Recommended Fix #1)
+// Health check for Render (keeps the server alive)
 app.get('/healthz', (req, res) => {
     res.status(200).send('OK');
 });
 
-app.get('/api/claims', async (req, res) => {
-    try {
-        const claims = await Claim.find().sort({ createdAt: -1 });
-        res.json(claims);
-    } catch (error) {
-        res.status(500).json({ error: "Failed to fetch claims." });
-    }
-});
 
+// ─── 7. START SERVER ───
 app.listen(PORT, () => {
-    console.log(`🚀 InsureVision Live (3-Key Rotator): http://localhost:${PORT}`);
+    console.log(`🚀 InsureVision Live: http://localhost:${PORT}`);
+    console.log(`📁 Architecture: MVC (Model-View-Controller)`);
+    console.log(`🤖 AI Engine: HuggingFace FastAPI`);
+    console.log(`🔑 Gemini: Multi-Key Rotator Active`);
+    console.log('\n📋 STUDENT PROJECT MODE - Quick Login:');
+    console.log('   Email: test@test.com');
+    console.log('   Password: password');
+    console.log('\n✅ Backend ready for frontend connections on port', PORT);
 });

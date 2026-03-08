@@ -1,3 +1,38 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Smooth theme transition */
+html {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* shadcn-style CSS variables for GlowingEffect */
+@layer base {
+  :root {
+    --background: #f0f4f0;
+    --foreground: #0f172a;
+    --muted: #f1f5f9;
+    --muted-foreground: #64748b;
+    --border: #e2e8f0;
+    --black: #000000;
+  }
+  .dark {
+    --background: #020617;
+    --foreground: #f8fafc;
+    --muted: #1e293b;
+    --muted-foreground: #94a3b8;
+    --border: #1e293b;
+    --black: #000000;
+  }
+}
+
+/* GlowingEffect glow animation */
+.glow {
+  position: absolute;
+  inset: 0;
+}
+.glow::after {
+  position: absolute;
+  content: "";
+}

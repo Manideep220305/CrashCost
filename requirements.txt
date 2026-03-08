@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+opencv-python-headless
+torch
+torchvision
+transformers
+ultralytics
+catboost
+shap
+pillow
